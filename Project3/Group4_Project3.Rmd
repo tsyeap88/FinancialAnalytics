@@ -1,0 +1,312 @@
+---
+title: "Group4_Project3"
+author: "Brandon Croarkin, Justin Longo, Brian Peirce, Teng Siong (T.S) Yeap"
+date: "September 18, 2018"
+output: html_document
+---
+
+```{r }
+rm(list = ls())
+library(ggplot2)
+library(flexdashboard)
+library(shiny)
+library(QRM)
+library(qrmdata)
+library(xts)
+library(zoo)
+library(plotly)
+#library(ggfortify)
+library(psych)
+library(matrixStats)
+library(moments)
+library(quantreg)
+library(quadprog)
+library(scales)
+
+# PAGE: Exploratory Analysis
+data <- na.omit(read.csv(url("https://turing.manhattan.edu/~wfoote01/finalytics/data/metaldata.csv"), header = TRUE))
+prices <- data
+# Compute log differences percent using as.matrix to force numeric type
+data.r <- diff(log(as.matrix(data[, -1]))) * 100
+# Create size and direction
+size <- na.omit(abs(data.r)) # size is indicator of volatility
+#head(size)
+colnames(size) <- paste(colnames(size),".size", sep = "") # Teetor
+direction <- ifelse(data.r > 0, 1, ifelse(data.r < 0, -1, 0)) # another indicator of volatility
+colnames(direction) <- paste(colnames(direction),".dir", sep = "")
+# Convert into a time series object: 
+# 1. Split into date and rates
+dates <- as.Date(data$DATE[-1], "%m/%d/%Y")
+dates.chr <- as.character(data$DATE[-1])
+#str(dates.chr)
+values <- cbind(data.r, size, direction)
+# for dplyr pivoting and ggplot2 need a data frame also known as "tidy data"
+data.df <- data.frame(dates = dates, returns = data.r, size = size, direction = direction)
+data.df.nd <- data.frame(dates = dates.chr, returns = data.r, size = size, direction = direction, stringsAsFactors = FALSE) 
+#non-coerced dates for subsetting on non-date columns
+# 2. Make an xts object with row names equal to the dates
+data.xts <- na.omit(as.xts(values, dates)) #order.by=as.Date(dates, "%d/%m/%Y")))
+#str(data.xts)
+data.zr <- as.zooreg(data.xts)
+returns <- data.xts # watch for this data below!
+
+# PAGE: Market risk 
+corr_rolling <- function(x) {	
+  dim <- ncol(x)	
+  corr_r <- cor(x)[lower.tri(diag(dim), diag = FALSE)]	
+  return(corr_r)	
+}
+vol_rolling <- function(x){
+  library(matrixStats)
+  vol_r <- colSds(x)
+  return(vol_r)
+}
+ALL.r <- data.xts[, 1:3]
+window <- 90 #reactive({input$window})
+corr_r <- rollapply(ALL.r, width = window, corr_rolling, align = "right", by.column = FALSE)
+colnames(corr_r) <- c("nickel.copper", "nickel.aluminium", "copper.aluminium")
+vol_r <- rollapply(ALL.r, width = window, vol_rolling, align = "right", by.column = FALSE)
+colnames(vol_r) <- c("nickel.vol", "copper.vol", "aluminium.vol")
+year <- format(index(corr_r), "%Y")
+r_corr_vol <- merge(ALL.r, corr_r, vol_r, year)
+library(quantreg)
+taus <- seq(.05,.95,.05)	# Roger Koenker UI Bob Hogg and Allen Craig
+fit.rq.nickel.copper <- rq(log(nickel.copper) ~ log(copper.vol), tau = taus, data = r_corr_vol)	
+fit.lm.nickel.copper <- lm(log(nickel.copper) ~ log(copper.vol), data = r_corr_vol)	
+# Some test statements	
+ni.cu.summary <- summary(fit.rq.nickel.copper, se = "boot")
+plot(ni.cu.summary)
+##
+title.chg <- "Metals Market Percent Changes"
+autoplot.zoo(data.xts[,1:3]) + ggtitle(title.chg) + ylim(-5, 5)
+autoplot.zoo(data.xts[,4:6]) + ggtitle(title.chg) + ylim(-5, 5)
+acf(coredata(data.xts[,1:3])) # returns
+acf(coredata(data.xts[,4:6])) # sizes
+#pacf here
+one <- ts(data.df$returns.nickel)
+two <- ts(data.df$returns.copper)
+# or
+one <- ts(data.zr[,1])
+two <- ts(data.zr[,2])
+title.chg <- "Nickel vs. Copper"
+ccf(one, two, main = title.chg, lag.max = 20, xlab = "", ylab = "", ci.col = "red")
+# build function to repeat these routines
+run_ccf <- function(one, two, main = title.chg, lag = 20, color = "red"){
+  # one and two are equal length series
+  # main is title
+  # lag is number of lags in cross-correlation
+  # color is color of dashed confidence interval bounds
+  stopifnot(length(one) == length(two))
+  one <- ts(one)
+  two <- ts(two)
+  main <- main
+  lag <- lag
+  color <- color
+  ccf(one, two, main = main, lag.max = lag, xlab = "", ylab = "", ci.col = color)
+  #end run_ccf
+}
+title <- "nickel-copper"
+run_ccf(one, two, main = title, lag = 20, color = "red")
+# now for volatility (sizes)
+one <- abs(data.zr[,1])
+two <- abs(data.zr[,2])
+title <- "Nickel-Copper: volatility"
+run_ccf(one, two, main = title, lag = 20, color = "red")
+##
+# Load the data_moments() function
+## data_moments function
+## INPUTS: r vector
+## OUTPUTS: list of scalars (mean, sd, median, skewness, kurtosis)
+data_moments <- function(data){
+  library(moments)
+  library(matrixStats)
+  mean.r <- colMeans(data)
+  median.r <- colMedians(data)
+  sd.r <- colSds(data)
+  IQR.r <- colIQRs(data)
+  skewness.r <- skewness(data)
+  kurtosis.r <- kurtosis(data)
+  result <- data.frame(mean = mean.r, median = median.r, std_dev = sd.r, IQR = IQR.r, skewness = skewness.r, kurtosis = kurtosis.r)
+  return(result)
+}
+# Run data_moments()
+answer <- data_moments(data.xts[, 5:8])
+# Build pretty table
+answer <- round(answer, 4)
+knitr::kable(answer)
+mean(data.xts[,4])
+##
+returns1 <- returns[,1]
+colnames(returns1) <- "Returns" #kluge to coerce column name for df
+returns1.df <- data.frame(Returns = returns1[,1], Distribution = rep("Historical", each = length(returns1)))
+  
+alpha <- 0.95 # reactive({ifelse(input$alpha.q>1,0.99,ifelse(input$alpha.q<0,0.001,input$alpha.q))})
+  
+# Value at Risk
+VaR.hist <- quantile(returns1,alpha)
+VaR.text <- paste("Value at Risk =", round(VaR.hist, 2))
+  
+# Determine the max y value of the desity plot.
+# This will be used to place the text above the plot
+VaR.y <- max(density(returns1.df$Returns)$y)
+  
+# Expected Shortfall
+ES.hist <- median(returns1[returns1 > VaR.hist])
+ES.text <- paste("Expected Shortfall =", round(ES.hist, 2))
+  
+p <- ggplot(returns1.df, aes(x = Returns, fill = Distribution)) + geom_density(alpha = 0.5) + 
+    geom_vline(aes(xintercept = VaR.hist), linetype = "dashed", size = 1, color = "firebrick1") + 
+    geom_vline(aes(xintercept = ES.hist), size = 1, color = "firebrick1") +
+    annotate("text", x = 2+ VaR.hist, y = VaR.y*1.05, label = VaR.text) +
+    annotate("text", x = 1.5+ ES.hist, y = VaR.y*1.1, label = ES.text) + scale_fill_manual( values = "dodgerblue4")
+p
+# Do the same for returns 2 aand 3
+##
+## Now for Loss Analysis
+# Get last prices
+price.last <- as.numeric(tail(data[, -1], n=1))
+# Specify the positions
+position.rf <- c(1/3, 1/3, 1/3)
+# And compute the position weights
+w <- position.rf * price.last
+# Fan these  the length and breadth of the risk factor series
+weights.rf <- matrix(w, nrow=nrow(data.r), ncol=ncol(data.r), byrow=TRUE)
+#head(rowSums((exp(data.r/100)-1)*weights.rf), n=3)
+## We need to compute exp(x) - 1 for very small x: expm1 accomplishes this
+#head(rowSums((exp(data.r/100)-1)*weights.rf), n=4)
+loss.rf <- -rowSums(expm1(data.r/100) * weights.rf)
+loss.rf.df <- data.frame(Loss = loss.rf, Distribution = rep("Historical", each = length(loss.rf)))
+## Simple Value at Risk and Expected Shortfall
+alpha.tolerance <- .95
+VaR.hist <- quantile(loss.rf, probs=alpha.tolerance, names=FALSE)
+## Just as simple Expected shortfall
+ES.hist <- median(loss.rf[loss.rf > VaR.hist])
+VaR.text <- paste("Value at Risk =\n", round(VaR.hist, 2)) # ="VaR"&c12
+ES.text <- paste("Expected Shortfall \n=", round(ES.hist, 2))
+title.text <- paste(round(alpha.tolerance*100, 0), "% Loss Limits")
+# using histogram bars instead of the smooth density
+p <- ggplot(loss.rf.df, aes(x = Loss, fill = Distribution)) + geom_histogram(alpha = 0.8) + geom_vline(aes(xintercept = VaR.hist), linetype = "dashed", size = 1, color = "blue") + geom_vline(aes(xintercept = ES.hist), size = 1, color = "blue") + annotate("text", x = VaR.hist, y = 40, label = VaR.text) + annotate("text", x = ES.hist, y = 20, label = ES.text) + xlim(0, 500) + ggtitle(title.text)
+p
+# mean excess plot to determine thresholds for extreme event management
+data <- as.vector(loss.rf) # data is purely numeric
+umin <-  min(data)         # threshold u min
+umax <-  max(data) - 0.1   # threshold u max
+nint <- 100                # grid length to generate mean excess plot
+grid.0 <- numeric(nint)    # grid store
+e <- grid.0                # store mean exceedances e
+upper <- grid.0            # store upper confidence interval
+lower <- grid.0            # store lower confidence interval
+u <- seq(umin, umax, length = nint) # threshold u grid
+alpha <- 0.95                  # confidence level
+for (i in 1:nint) {
+    data <- data[data > u[i]]  # subset data above thresholds
+    e[i] <- mean(data - u[i])  # calculate mean excess of threshold
+    sdev <- sqrt(var(data))    # standard deviation
+    n <- length(data)          # sample size of subsetted data above thresholds
+    upper[i] <- e[i] + (qnorm((1 + alpha)/2) * sdev)/sqrt(n) # upper confidence interval
+    lower[i] <- e[i] - (qnorm((1 + alpha)/2) * sdev)/sqrt(n) # lower confidence interval
+  }
+mep.df <- data.frame(threshold = u, threshold.exceedances = e, lower = lower, upper = upper)
+loss.excess <- loss.rf[loss.rf > u]
+# Voila the plot => you may need to tweak these limits!
+p <- ggplot(mep.df, aes( x= threshold, y = threshold.exceedances)) + geom_line() + geom_line(aes(x = threshold, y = lower), colour = "red") + geom_line(aes(x = threshold,  y = upper), colour = "red") + annotate("text", x = 400, y = 200, label = "upper 95%") + annotate("text", x = 200, y = 0, label = "lower 5%")
+p
+##
+# GPD to describe and analyze the extremes
+#
+#library(QRM)
+alpha.tolerance <- 0.95
+u <- quantile(loss.rf, alpha.tolerance , names=FALSE)
+fit <- fit.GPD(loss.rf, threshold=u) # Fit GPD to the excesses
+xi.hat <- fit$par.ests[["xi"]] # fitted xi
+beta.hat <- fit$par.ests[["beta"]] # fitted beta
+data <- loss.rf
+n.relative.excess <- length(loss.excess) / length(loss.rf) # = N_u/n
+VaR.gpd <- u + (beta.hat/xi.hat)*(((1-alpha.tolerance) / n.relative.excess)^(-xi.hat)-1) 
+ES.gpd <- (VaR.gpd + beta.hat-xi.hat*u) / (1-xi.hat)
+n.relative.excess <- length(loss.excess) / length(loss.rf) # = N_u/n
+VaR.gpd <- u + (beta.hat/xi.hat)*(((1-alpha.tolerance) / n.relative.excess)^(-xi.hat)-1) 
+ES.gpd <- (VaR.gpd + beta.hat-xi.hat*u) / (1-xi.hat)
+# Plot away
+VaRgpd.text <- paste("GPD: Value at Risk =", round(VaR.gpd, 2))
+ESgpd.text <- paste("Expected Shortfall =", round(ES.gpd, 2))
+title.text <- paste(VaRgpd.text, ESgpd.text, sep = " ")
+loss.plot <- ggplot(loss.rf.df, aes(x = Loss, fill = Distribution)) + geom_density(alpha = 0.2)
+loss.plot <- loss.plot + geom_vline(aes(xintercept = VaR.gpd), colour = "blue", linetype = "dashed", size = 0.8)
+loss.plot <- loss.plot + geom_vline(aes(xintercept = ES.gpd), colour = "blue", size = 0.8) 
+  #+ annotate("text", x = 300, y = 0.0075, label = VaRgpd.text, colour = "blue") + annotate("text", x = 300, y = 0.005, label = ESgpd.text, colour = "blue")
+loss.plot <- loss.plot + xlim(0,500) + ggtitle(title.text)
+loss.plot
+#
+# Confidence in GPD
+#
+showRM(fit, alpha = 0.99, RM = "ES", method = "BFGS") 
+showRM(fit, alpha = 0.99, RM = "VaR", method = "BFGS")
+##
+# Generate overlay of historical and GPD; could also use Gaussian or t as well from the asynchronous material
+```
+
+#2. List in the text the 'R' skills needed to complete this project.
+
+- ggplot2, plotly and scales library allows us to build complex visualizations that will aid the generation of further insights.
+- psych library helps us to explore the interactions among data through scatter plots and histograms.
+- QRM estimates Student-t and generalized pareto distribution (GPD) simulation.
+quantreg to estimation and inference methods for models of conditional - quantiles
+- flexdashboard to publish a group of related data visualizations as a dashboard. It allows for storyboard layouts for presenting sequences of visualizations and related commentary. 
+- shiny to create interactive visualizations of data. 
+- tidyr helps for data tidying to help clean and reshape data for analysis
+- Zoo is used to help with irregular time series of numeric vectors/matrices and factors
+
+#3. Explain each of the functions (e.g., ggplot()) used to compute and visualize results.
+- read.csv(): reads in the comma separated file with data for nickel, copper, and aluminum
+- na.omit(): returns a data table with just the rows where the specified columns have no missing value in any of them. 
+- ifelse(): returns a value with the same shape as the vector it is used on filled with elements depending on whether the test condition is TRUE or FALSE. Was used to add in a direction column for whether the return is positive or negative. 
+- diff(): returns suitably lagged and iterated differences
+- log(): computes logarithms, by default natural logarithms
+- abs(): returns absolute values
+- colnames(): sets the column names of a matrix-like object
+- paste(): concatenates vectors after converting to character
+- as.Date(): converts between character representations and objects of class "Date" representing calendar dates
+- cbind(): takes a vector, matrix, or dataframe and combines by columns
+- as.character(): create or test for objects of type "character"
+- data.frame(): creates data frames with tightly coupled collections of variables
+- as.zooreg(): a subclass of "zoo" that is used to represent both weakly and strictly regular series.
+- corr_rolling(): calculates a rolling correlation
+- ncol(): returns the number of rows or columns present
+- lower.tri(): returns a matrix of logicals the same size of a given matrix in the lower triangle
+- diag(): extract the diagonal of a matrix
+- vol_rolling(): loads the matrixStats library and computes the column standard deviations
+- colSds(): standard deviation estimates for each column in matrix
+- rollapply(): applies a function to rolling margins of an array. A window of 90 was chosen (the number of observations). "By.column" was set to FALSE so the functions were not applied to each column separately. 
+- merge(): used to merge the ALL.r, corr_r, vol_r, and year dataframes
+- rq(): performs a quantile regression by taking the matrix that we built, log(nickel.copper) and log(copper.vol) with a 0.05 tau increment sequence from 0.05 to 0.95.
+- lm(): performs a linear regression by taking log(nickel.copper) and log(copper.vol)
+- summary(): to output a summary of the regression by se = "boog means using bootstrapping method to compute the standard deviation. 
+Plot log difference percent and size by using autoplot.zoo which takes a zoo object and returns a ggplot2 visualization.
+- Plot the persistence of returns by using acf() and pacf()
+- run_ccf(): checks to see if the two series are equal, if they are, it looks creates a time series objects from them both and then runs a ccf on them
+- Data_moments(): using the "moments" and "matrixStats" libraries it creates a dataframe with a set of common data summarization methods (means, median, standard deviation, IQR, skewness, and kurtosis)
+quantile(): produces sample quantiles corresponding to the given probabilities
+- Use ggplot2 to plot the returns distribution, add a vertical line to show the value at risk (VaR) and another dashed vertical line to show the value of the expected shortfall.
+
+#4. Discuss how well did the results begin to answer the business questions posed at the beginning of each part of the project.
+
+**1.	How would the performance of these commodities affect the size and timing of shipping arrangements?**
+
+The value at risk of the shipment mix would be matched to the market performance ergo value of the commodities. The timing of the shipment may directly correlate to the proportionate projected volatility of the shipment mix. Should that shipment contain our discovered optimal mix of all three metals, for example, shipping near a seasonal or cyclical peak of Copper, Nickel, or Aluminum would optimize shipment value while remaining diversified. It may even be necessary to inverse the proportions of shipment mix to their market performance in order to mitigate risk. In that case, more shipments would be necessary to maintain a lower value at risk while also capitalizing on pricing. We see that certain mixes of metals and volumes will provide us with less volatility and more value for our risk associated. Copper and aluminum both have a mean over .80 (copper at .8830 and aluminum at .8072) They also have smaller standard deviations which proves to be more consistent and at less risk when developing what will be necessary to achieve optimal size and mix. We would use more copper and aluminum in the shipments to help reduce risk and use nickel and copper to build variation that could provide returns or associated acceptable loss from the level we determine for risk (alpha). 
+
+**2.	How would the value of new shipping arrangements affect the value of our business with our current customers?**
+
+Understandably, the ship owners would charge a proportionate or perhaps arbitrary premium for peak-pricing shipments, as there is literally more at stake - unless this sort of market timing shipment agreement was stated in the T&C or manifest.
+
+The manufacturers would have arranged for a forwarded price in comparison to market value, so they may continue to do so paying larger strike prices, but any shipments during a commodity market cycle may be an impetus for increased forwards activity.
+
+The traders themselves may react to increased prices with additional volumes, which tend to magnify the effect of gains or losses their brokerage fees should not change, as it is volumes that tend to benefit traders and market makers. Additionally they may be willing to pay premiums for rush shipments in order to capitalize on current or near-future pricing.
+
+**3.	How would we manage the allocation of existing resources given we have just landed in this new market?**
+
+Initially we may use derivatives (primarily options) trading in order to produce some cash flows while we attempt to place our model against current market conditions. This also gives us a chance to minimize market risk, while also understanding optimal market timing/cycle. Should our model work with the macroeconomic trends, we could then implement the shipment mix value and size while constantly updating our databases and model.
+
+It would also be wise to maintain levels of liquidity (say 5%), should there be externalities not captured in our model.
+
+We also may try to buy strangles or straddles with premiums in order to bet against or for volatility. In this case, I would bet against volatility looking to the standard deviations we see in the copper, aluminum, nickel, and copper.  Since copper and nickel seem to be rather stable in their returns and prices I would bet they would continue to grow or have loss within the thresholds we found in the data (-.05, 0.06). The GPD is (.08,64.87) in the tail estimate and the ES is .99 which gives us 386.06 for exceedances. This is different from the .95 threshold we established as our risk tolerance. The lower our count the higher the expected loss on average. 
